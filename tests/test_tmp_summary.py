@@ -14,8 +14,8 @@ def test_resolve_updates_totals(total_a, total_b, expect_a, expect_b):
     userB = User(id="B", name="B")
 
     # +: 受け取る -:支払う 
-    summaryA = TmpSummary(userA, 1000)    # A: 誰かから「1000」を受け取る
-    summaryB = TmpSummary(userB, -1000)   # B: 誰かに「1000」を支払う
+    summaryA = TmpSummary(userA, total_a)    # A: 誰かから「1000」を受け取る
+    summaryB = TmpSummary(userB, total_b)   # B: 誰かに「1000」を支払う
 
     ex = summaryA.resolve(summaryB)
 

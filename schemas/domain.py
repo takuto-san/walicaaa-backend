@@ -60,8 +60,8 @@ class Event(BaseModel):
         # 誰にいくらい払ったかを抽出
         return [p.asset(u) for p in self.payments if p.payer.alike(u)]
 
-    def payment_summaries(self) -> List['PaymentSummary']:
-        # 各ユーザーの資産・負債を集計し、PaymentSummary のリストを返す
+    def payment_summaries(self) -> 'PaymentSummaryCollection':
+        # 各ユーザーの資産・負債を集計し、PaymentSummaryCollectionを返す
         summaries: List[PaymentSummary] = []
         for u in self.users:
             assets = [p.asset(u) for p in self.payments if p.payer.alike(u)]
@@ -73,7 +73,7 @@ class Event(BaseModel):
                     debts=DebtCollection(__root__=debts)
                 )
             )
-        return summaries
+        return PaymentSummaryCollection(__root__=summaries)
 
 
 class Exchange(BaseModel):
@@ -203,13 +203,21 @@ class PaymentSummary(BaseModel):
 
 class PaymentSummaryCollection(BaseModel):
     __root__: List[PaymentSummary]
-
+    
+    # ex:
+    # summaries = PaymentSummaryCollection(__root__=[
+    # PaymentSummary(user=A, paid=2000, share=1000),
+    # PaymentSummary(user=B, paid= 500, share=1000),
+    # PaymentSummary(user=C, paid= 500, share=1000),
+    # ])
+    
     def __iter__(self):
         return iter(self.__root__)
 
-    def exchanges(self) -> ExchangeCollection:
-        tmps: List[TmpSummary] = [ps.tmp_summary() for ps in self.__root__]
-        exchanges: List[Exchange] = []
+    def exchnange(self) -> ExchangeCollection:
+        # 各ユーザーの一時的な集計を取得
+        tmps = [ps.tmp_summary() for ps in self.__root__]
+        exchanges = []
         while True:
             unsettled = [t for t in tmps if not t.done()]
             if len(unsettled) < 2:
@@ -218,6 +226,5 @@ class PaymentSummaryCollection(BaseModel):
             neg = next((t for t in unsettled if t.total < 0), None)
             if pos is None or neg is None:
                 break
-            ex = pos.resolve(neg)
-            exchanges.append(ex)
+            exchanges.append(pos.resolve(neg))
         return ExchangeCollection(__root__=exchanges)
