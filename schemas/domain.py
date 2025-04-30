@@ -5,6 +5,7 @@ domain.py
 
 from typing import List, Any
 from pydantic import BaseModel, root_validator
+import math
 
 # Base
 class User(BaseModel):
@@ -59,6 +60,21 @@ class Event(BaseModel):
         # 誰にいくらい払ったかを抽出
         return [p.asset(u) for p in self.payments if p.payer.alike(u)]
 
+    def payment_summaries(self) -> List['PaymentSummary']:
+        # 各ユーザーの資産・負債を集計し、PaymentSummary のリストを返す
+        summaries: List[PaymentSummary] = []
+        for u in self.users:
+            assets = [p.asset(u) for p in self.payments if p.payer.alike(u)]
+            debts = [p.debt(u) for p in self.payments if any(payee.alike(u) for payee in p.payees)]
+            summaries.append(
+                PaymentSummary(
+                    user=u,
+                    assets=AssetCollection(__root__=assets),
+                    debts=DebtCollection(__root__=debts)
+                )
+            )
+        return summaries
+
 
 class Exchange(BaseModel):
     price: int
@@ -68,27 +84,21 @@ class Exchange(BaseModel):
 
 # Collections
 class UserCollection(BaseModel):
-    # __root__: このクラス全体がリスト1個だけでできている
     __root__: List[User]
 
-    # 渡ってきたユーザがこのコレクションに含まれているか
     def contains(self, u: User) -> bool:
         return any(user.alike(u) for user in self.__root__)
 
-    # コレクションの人数を取得
     def __len__(self) -> int:
         return len(self.__root__)
 
-    # イテレータとして扱える（for文で回せる）
     def __iter__(self):
         return iter(self.__root__)
 
 
 class AssetCollection(BaseModel):
-    # Asset型だけのリストを持っている（単一リストを扱う特別な方法）
     __root__: List[Asset]
 
-    # コレクションに含まれるすべてのAssetのpriceの合計を取得
     def asset_sum(self) -> int:
         return sum(asset.price for asset in self.__root__)
 
@@ -106,16 +116,13 @@ class DebtCollection(BaseModel):
         return iter(self.__root__)
 
 
-# 複数のPayment（支払い）をまとめて管理
 class PaymentCollection(BaseModel):
     __root__: List[Payment]
 
-    # 支払いの中でu（与えられたユーザー）が払われた分（負債）を抽出
     def extract_debts(self, u: User) -> DebtCollection:
         debts = [p.debt(u) for p in self.__root__ if any(payee.alike(u) for payee in p.payees)]
         return DebtCollection(__root__=debts)
 
-    # 支払いの中でuが支払った分（資産）を抽出
     def extract_assets(self, u: User) -> AssetCollection:
         assets = [p.asset(u) for p in self.__root__ if p.payer.alike(u)]
         return AssetCollection(__root__=assets)
@@ -131,6 +138,7 @@ class ExchangeCollection(BaseModel):
         return iter(self.__root__)
 
 
+# 2人の間の一時的な集計
 class TmpSummary:
     def __init__(self, user: User, total: int) -> None:
         self.user = user
@@ -139,32 +147,32 @@ class TmpSummary:
     def done(self) -> bool:
         return self.total == 0
 
-    def resolve(self, subject: "TmpSummary") -> Exchange:
+    def resolve(self, subject: 'TmpSummary') -> Exchange:
         # 両方正負同符号 or どちらかが0の場合は無効
         if self.total * subject.total >= 0:
-            raise ValueError("invalid resolve")
+            raise ValueError('invalid resolve')
 
-        # ① 完全に相殺できる場合
+        # 1. 完全に相殺できる場合
         if self.total + subject.total == 0:
-            # 両者を0にして終了
+            price = abs(self.total)
             self.total = 0
             subject.total = 0
             payee = bigger(self, subject).user
             payer = smaller(self, subject).user
-            return Exchange(price=self.total, payee=payee, payer=payer)
+            return Exchange(price=price, payee=payee, payer=payer)
 
-        # ② self が相殺される場合 (abs(self) < abs(subject))
+        # 2. self が相殺される場合 (abs(self) < abs(subject))
         if abs(self.total) < abs(subject.total):
-            subject.total = self.total + subject.total
             price = abs(self.total)
+            subject.total = self.total + subject.total
             self.total = 0
             payee = bigger(self, subject).user
             payer = smaller(self, subject).user
             return Exchange(price=price, payee=payee, payer=payer)
 
-        # ③ subject が相殺される場合 (その他)
-        self.total = self.total + subject.total
+        # 3. subject が相殺される場合 (その他)
         price = abs(subject.total)
+        self.total = self.total + subject.total
         subject.total = 0
         payee = bigger(self, subject).user
         payer = smaller(self, subject).user
@@ -176,3 +184,40 @@ def bigger(a: TmpSummary, b: TmpSummary) -> TmpSummary:
 
 def smaller(a: TmpSummary, b: TmpSummary) -> TmpSummary:
     return a if a.total <= b.total else b
+
+
+class PaymentSummary(BaseModel):
+    user: User
+    assets: AssetCollection
+    debts: DebtCollection
+
+    def total(self) -> int:
+        return self.assets.asset_sum() - self.debts.debt_sum()
+
+    def total_abs(self) -> int:
+        return abs(self.total())
+
+    def tmp_summary(self) -> TmpSummary:
+        return TmpSummary(user=self.user, total=self.total())
+
+
+class PaymentSummaryCollection(BaseModel):
+    __root__: List[PaymentSummary]
+
+    def __iter__(self):
+        return iter(self.__root__)
+
+    def exchanges(self) -> ExchangeCollection:
+        tmps: List[TmpSummary] = [ps.tmp_summary() for ps in self.__root__]
+        exchanges: List[Exchange] = []
+        while True:
+            unsettled = [t for t in tmps if not t.done()]
+            if len(unsettled) < 2:
+                break
+            pos = next((t for t in unsettled if t.total > 0), None)
+            neg = next((t for t in unsettled if t.total < 0), None)
+            if pos is None or neg is None:
+                break
+            ex = pos.resolve(neg)
+            exchanges.append(ex)
+        return ExchangeCollection(__root__=exchanges)
